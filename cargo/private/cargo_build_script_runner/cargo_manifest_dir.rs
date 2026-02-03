@@ -29,18 +29,52 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
 
 /// Remove a symlink on Windows systems.
 ///
-/// On Windows, directory symlinks cannot be removed with remove_dir() when the
-/// target directory is not empty. However, on Windows 10+ with Developer Mode
-/// enabled, directory symlinks can be removed with remove_file().
+/// On Windows, removing directory symlinks is tricky:
+/// - `remove_file()` works on Windows 10+ with Developer Mode for symlinks
+/// - `remove_dir()` works for junctions but fails with ERROR_DIR_NOT_EMPTY (145)
+///   for symlinks pointing to non-empty directories
 ///
-/// This function tries remove_file() first, then falls back to remove_dir().
+/// This function tries multiple approaches:
+/// 1. `remove_file()` - works for file symlinks and dir symlinks with Developer Mode
+/// 2. `remove_dir()` - works for junctions and empty dir symlinks
+/// 3. Shell `rd` command - reliable fallback that handles all cases
 #[cfg(target_family = "windows")]
 pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
-    let is_dir = path.is_dir();
+    // First try remove_file - works on Windows 10+ with Developer Mode for dir symlinks
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(ref e) if is_dir && e.raw_os_error() == Some(5) => std::fs::remove_dir(path),
-        Err(e) => Err(e),
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(5) => {
+            // ACCESS_DENIED - might be a directory symlink without proper permissions
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Try remove_dir - works for junctions
+    match std::fs::remove_dir(path) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(145) => {
+            // DIR_NOT_EMPTY - symlink to non-empty dir, need special handling
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Last resort: use cmd /c rd which properly handles all symlink types
+    let path_str = path.to_string_lossy();
+    let output = std::process::Command::new("cmd")
+        .args(["/c", "rd", &path_str])
+        .output()?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "Failed to remove exec_root link '{}' with rd command: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        ))
     }
 }
 
