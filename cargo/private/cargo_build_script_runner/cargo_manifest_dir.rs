@@ -74,7 +74,8 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     }
 
     // Last resort: use cmd /c rd which properly handles all symlink types
-    let path_str = path.to_string_lossy();
+    // Convert forward slashes to backslashes for Windows cmd.exe
+    let path_str = path.to_string_lossy().replace('/', "\\");
     let output = std::process::Command::new("cmd")
         .args(["/c", "rd", &path_str])
         .output()?;
