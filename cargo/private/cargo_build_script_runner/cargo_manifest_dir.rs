@@ -116,8 +116,11 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     ))
 }
 
-/// Check if the system supports symlinks by attempting to create one.
+/// Check if the system supports symlinks by attempting to create and remove one.
+/// On Windows, also tests directory symlink removal since that can fail even when
+/// file symlinks work.
 fn system_supports_symlinks(test_dir: &Path) -> Result<bool, String> {
+    // Test file symlink
     let test_file = test_dir.join("cbsr.txt");
     std::fs::write(&test_file, "").map_err(|e| {
         format!(
@@ -129,25 +132,64 @@ fn system_supports_symlinks(test_dir: &Path) -> Result<bool, String> {
     let test_link = test_dir.join("cbsr.link.txt");
     match symlink(&test_file, &test_link) {
         Err(_) => {
-            std::fs::remove_file(test_file).map_err(|e| {
-                format!("Failed to delete file {} with {:?}", test_link.display(), e)
-            })?;
-            Ok(false)
+            let _ = std::fs::remove_file(&test_file);
+            return Ok(false);
         }
         Ok(_) => {
-            remove_symlink(&test_link).map_err(|e| {
-                format!(
-                    "Failed to remove symlink {} with {:?}",
-                    test_link.display(),
-                    e
-                )
-            })?;
-            std::fs::remove_file(test_file).map_err(|e| {
-                format!("Failed to delete file {} with {:?}", test_link.display(), e)
-            })?;
-            Ok(true)
+            if remove_symlink(&test_link).is_err() {
+                let _ = std::fs::remove_file(&test_file);
+                return Ok(false);
+            }
+            let _ = std::fs::remove_file(&test_file);
         }
     }
+
+    // On Windows, also test directory symlink since it has different behavior
+    #[cfg(target_family = "windows")]
+    {
+        let test_src_dir = test_dir.join("cbsr_test_dir");
+        std::fs::create_dir_all(&test_src_dir).map_err(|e| {
+            format!(
+                "Failed to create test dir for checking symlink support '{}' with {:?}",
+                test_src_dir.display(),
+                e
+            )
+        })?;
+        // Create a file inside so we test non-empty directory removal
+        let test_inner_file = test_src_dir.join("inner.txt");
+        std::fs::write(&test_inner_file, "").map_err(|e| {
+            format!(
+                "Failed to write inner test file '{}' with {:?}",
+                test_inner_file.display(),
+                e
+            )
+        })?;
+
+        let test_dir_link = test_dir.join("cbsr_test_dir_link");
+        match symlink(&test_src_dir, &test_dir_link) {
+            Err(_) => {
+                let _ = std::fs::remove_file(&test_inner_file);
+                let _ = std::fs::remove_dir(&test_src_dir);
+                return Ok(false);
+            }
+            Ok(_) => {
+                // The critical test: can we remove a directory symlink pointing to non-empty dir?
+                let removal_result = remove_symlink(&test_dir_link);
+                // Clean up test directory
+                let _ = std::fs::remove_file(&test_inner_file);
+                let _ = std::fs::remove_dir(&test_src_dir);
+                // Also try to clean up symlink if it still exists
+                let _ = remove_symlink(&test_dir_link);
+
+                if removal_result.is_err() {
+                    // Directory symlink removal failed - fall back to copy mode
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    Ok(true)
 }
 
 fn is_dir_empty(path: &Path) -> Result<bool, String> {
