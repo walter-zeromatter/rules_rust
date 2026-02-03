@@ -106,7 +106,20 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
         }
     }
 
-    // If all approaches failed, return an error
+    // If all approaches failed on Windows, log and continue.
+    // The symlinks are in bazel's output directory and will be cleaned up
+    // by bazel's normal cleanup processes. Failing the build for cleanup
+    // issues is overly strict.
+    #[cfg(target_family = "windows")]
+    {
+        eprintln!(
+            "Warning: Could not remove symlink '{}', continuing anyway",
+            path.display()
+        );
+        return Ok(());
+    }
+
+    #[cfg(not(target_family = "windows"))]
     Err(std::io::Error::new(
         std::io::ErrorKind::Other,
         format!(
