@@ -74,33 +74,46 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     }
 
     // Last resort: use PowerShell to remove the symlink
-    // PowerShell's Remove-Item with -Force handles symlinks correctly
+    // PowerShell's Delete() method handles directory symlinks correctly
+    // Use full path since sandbox may not have powershell in PATH
     let path_str = path.to_string_lossy().replace('/', "\\");
     let ps_script = format!(
         "(Get-Item -LiteralPath '{}').Delete()",
         path_str.replace("'", "''")
     );
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output()?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        // If it fails because file doesn't exist, that's OK
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Cannot find path") || stderr.contains("ItemNotFoundException") {
-            return Ok(());
+    // Try standard PowerShell locations
+    let ps_paths = [
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe",
+        "powershell.exe",
+    ];
+    for ps_path in ps_paths {
+        match std::process::Command::new(ps_path)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+            .output()
+        {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // If it fails because file doesn't exist, that's OK
+                if stderr.contains("Cannot find path") || stderr.contains("ItemNotFoundException") {
+                    return Ok(());
+                }
+                // Continue trying other PowerShell paths if this one failed
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "Failed to remove exec_root link '{}' with PowerShell: {}",
-                path.display(),
-                stderr
-            ),
-        ))
     }
+
+    // If all approaches failed, return an error
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!(
+            "Failed to remove exec_root link '{}': all removal methods failed",
+            path.display()
+        ),
+    ))
 }
 
 /// Check if the system supports symlinks by attempting to create one.
