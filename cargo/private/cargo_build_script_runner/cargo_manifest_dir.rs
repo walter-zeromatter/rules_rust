@@ -73,25 +73,29 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
         Err(e) => return Err(e),
     }
 
-    // Last resort: use cmd /c rd which properly handles all symlink types
-    // Convert forward slashes to backslashes for Windows cmd.exe
+    // Last resort: use PowerShell to remove the symlink
+    // PowerShell's Remove-Item with -Force handles symlinks correctly
     let path_str = path.to_string_lossy().replace('/', "\\");
-    let output = std::process::Command::new("cmd")
-        .args(["/c", "rd", &path_str])
+    let ps_script = format!(
+        "(Get-Item -LiteralPath '{}').Delete()",
+        path_str.replace("'", "''")
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
         .output()?;
 
     if output.status.success() {
         Ok(())
     } else {
-        // If rd fails because file doesn't exist, that's OK
+        // If it fails because file doesn't exist, that's OK
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("cannot find") || stderr.contains("The system cannot find") {
+        if stderr.contains("Cannot find path") || stderr.contains("ItemNotFoundException") {
             return Ok(());
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!(
-                "Failed to remove exec_root link '{}' with rd command: {}",
+                "Failed to remove exec_root link '{}' with PowerShell: {}",
                 path.display(),
                 stderr
             ),
