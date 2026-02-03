@@ -27,13 +27,20 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     std::fs::remove_file(path)
 }
 
-/// Create a symlink file on windows systems
+/// Remove a symlink on Windows systems.
+///
+/// On Windows, directory symlinks cannot be removed with remove_dir() when the
+/// target directory is not empty. However, on Windows 10+ with Developer Mode
+/// enabled, directory symlinks can be removed with remove_file().
+///
+/// This function tries remove_file() first, then falls back to remove_dir().
 #[cfg(target_family = "windows")]
 pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
-    if path.is_dir() {
-        std::fs::remove_dir(path)
-    } else {
-        std::fs::remove_file(path)
+    let is_dir = path.is_dir();
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(ref e) if is_dir && e.raw_os_error() == Some(5) => std::fs::remove_dir(path),
+        Err(e) => Err(e),
     }
 }
 
