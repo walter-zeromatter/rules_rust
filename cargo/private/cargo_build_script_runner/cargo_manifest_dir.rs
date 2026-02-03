@@ -38,11 +38,22 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
 /// 1. `remove_file()` - works for file symlinks and dir symlinks with Developer Mode
 /// 2. `remove_dir()` - works for junctions and empty dir symlinks
 /// 3. Shell `rd` command - reliable fallback that handles all cases
+///
+/// If the file doesn't exist, this function returns Ok(()) since the goal is removal.
 #[cfg(target_family = "windows")]
 pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
+    // If the path doesn't exist, nothing to do
+    if !path.exists() && !path.is_symlink() {
+        return Ok(());
+    }
+
     // First try remove_file - works on Windows 10+ with Developer Mode for dir symlinks
     match std::fs::remove_file(path) {
         Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(2) => {
+            // FILE_NOT_FOUND - already removed or doesn't exist
+            return Ok(());
+        }
         Err(e) if e.raw_os_error() == Some(5) => {
             // ACCESS_DENIED - might be a directory symlink without proper permissions
         }
@@ -52,6 +63,10 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     // Try remove_dir - works for junctions
     match std::fs::remove_dir(path) {
         Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(2) => {
+            // FILE_NOT_FOUND - already removed
+            return Ok(());
+        }
         Err(e) if e.raw_os_error() == Some(145) => {
             // DIR_NOT_EMPTY - symlink to non-empty dir, need special handling
         }
@@ -67,12 +82,17 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     if output.status.success() {
         Ok(())
     } else {
+        // If rd fails because file doesn't exist, that's OK
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("cannot find") || stderr.contains("The system cannot find") {
+            return Ok(());
+        }
         Err(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!(
                 "Failed to remove exec_root link '{}' with rd command: {}",
                 path.display(),
-                String::from_utf8_lossy(&output.stderr)
+                stderr
             ),
         ))
     }
