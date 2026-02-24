@@ -296,12 +296,7 @@ fn json_warning(line: &str) -> JsonValue {
     ]))
 }
 
-fn process_line(
-    mut line: String,
-    quit_on_rmeta: bool,
-    format: ErrorFormat,
-    metadata_emitted: &mut bool,
-) -> Result<LineOutput, String> {
+fn process_line(mut line: String, format: ErrorFormat) -> Result<LineOutput, String> {
     // LLVM can emit lines that look like the following, and these will be interspersed
     // with the regular JSON output. Arguably, rustc should be fixed not to emit lines
     // like these (or to convert them to JSON), but for now we convert them to JSON
@@ -315,11 +310,7 @@ fn process_line(
             return Ok(LineOutput::Skip);
         }
     }
-    if quit_on_rmeta {
-        rustc::stop_on_rmeta_completion(line, format, metadata_emitted)
-    } else {
-        rustc::process_json(line, format)
-    }
+    rustc::process_json(line, format)
 }
 
 fn main() -> Result<(), ProcessWrapperError> {
@@ -381,26 +372,15 @@ fn main() -> Result<(), ProcessWrapperError> {
         None
     };
 
-    let mut was_killed = false;
+    let was_killed = false;
     let result = if let Some(format) = opts.rustc_output_format {
-        let quit_on_rmeta = opts.rustc_quit_on_rmeta;
-        // Process json rustc output and kill the subprocess when we get a signal
-        // that we emitted a metadata file.
-        let mut me = false;
-        let metadata_emitted = &mut me;
-        let result = process_output(
+        // Process json rustc output, converting LLVM noise to JSON warnings.
+        process_output(
             &mut child_stderr,
             stderr.as_mut(),
             output_file.as_mut(),
-            move |line| process_line(line, quit_on_rmeta, format, metadata_emitted),
-        );
-        if me {
-            // If recv returns Ok(), a signal was sent in this channel so we should terminate the child process.
-            // We can safely ignore the Result from kill() as we don't care if the process already terminated.
-            let _ = child.kill();
-            was_killed = true;
-        }
-        result
+            move |line| process_line(line, format),
+        )
     } else {
         // Process output normally by forwarding stderr
         process_output(
@@ -415,7 +395,6 @@ fn main() -> Result<(), ProcessWrapperError> {
     let status = child
         .wait()
         .map_err(|e| ProcessWrapperError(format!("failed to wait for child process: {}", e)))?;
-    // If the child process is rustc and is killed after metadata generation, that's also a success.
     let code = status_code(status, was_killed);
     let success = code == 0;
     if success {
@@ -454,7 +433,6 @@ mod test {
 
     #[test]
     fn test_process_line_diagnostic_json() -> Result<(), String> {
-        let mut metadata_emitted = false;
         let LineOutput::Message(msg) = process_line(
             r#"
                 {
@@ -463,9 +441,7 @@ mod test {
                 }
             "#
             .to_string(),
-            false,
             ErrorFormat::Json,
-            &mut metadata_emitted,
         )?
         else {
             return Err("Expected a LineOutput::Message".to_string());
@@ -486,7 +462,6 @@ mod test {
 
     #[test]
     fn test_process_line_diagnostic_rendered() -> Result<(), String> {
-        let mut metadata_emitted = false;
         let LineOutput::Message(msg) = process_line(
             r#"
                 {
@@ -495,9 +470,7 @@ mod test {
                 }
             "#
             .to_string(),
-            /*quit_on_rmeta=*/ false,
             ErrorFormat::Rendered,
-            &mut metadata_emitted,
         )?
         else {
             return Err("Expected a LineOutput::Message".to_string());
@@ -508,16 +481,13 @@ mod test {
 
     #[test]
     fn test_process_line_noise() -> Result<(), String> {
-        let mut metadata_emitted = false;
         for text in [
             "'+zaamo' is not a recognized feature for this target (ignoring feature)",
             " WARN rustc_errors::emitter Invalid span...",
         ] {
             let LineOutput::Message(msg) = process_line(
                 text.to_string(),
-                /*quit_on_rmeta=*/ false,
                 ErrorFormat::Json,
-                &mut metadata_emitted,
             )?
             else {
                 return Err("Expected a LineOutput::Message".to_string());
@@ -538,50 +508,6 @@ mod test {
                 ))?
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn test_process_line_emit_link() -> Result<(), String> {
-        let mut metadata_emitted = false;
-        assert!(matches!(
-            process_line(
-                r#"
-                {
-                    "$message_type": "artifact",
-                    "emit": "link"
-                }
-            "#
-                .to_string(),
-                /*quit_on_rmeta=*/ true,
-                ErrorFormat::Rendered,
-                &mut metadata_emitted,
-            )?,
-            LineOutput::Skip
-        ));
-        assert!(!metadata_emitted);
-        Ok(())
-    }
-
-    #[test]
-    fn test_process_line_emit_metadata() -> Result<(), String> {
-        let mut metadata_emitted = false;
-        assert!(matches!(
-            process_line(
-                r#"
-                {
-                    "$message_type": "artifact",
-                    "emit": "metadata"
-                }
-            "#
-                .to_string(),
-                /*quit_on_rmeta=*/ true,
-                ErrorFormat::Rendered,
-                &mut metadata_emitted,
-            )?,
-            LineOutput::Terminate
-        ));
-        assert!(metadata_emitted);
         Ok(())
     }
 }
