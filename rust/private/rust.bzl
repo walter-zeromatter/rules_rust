@@ -205,15 +205,26 @@ def _rust_library_common(ctx, crate_type):
         crate_type,
         disable_pipelining = getattr(ctx.attr, "disable_pipelining", False),
     ):
-        rust_metadata = ctx.actions.declare_file(
-            paths.replace_extension(rust_lib_name, ".rmeta"),
-            sibling = rust_lib,
-        )
-        rustc_rmeta_output = generate_output_diagnostics(ctx, rust_metadata)
         metadata_supports_pipelining = (
             can_use_metadata_for_pipelining(toolchain, crate_type) and
-            not ctx.attr.disable_pipelining
+            not getattr(ctx.attr, "disable_pipelining", False)
         )
+        # Hollow rlib approach (Buck2-style): the metadata action produces an rlib
+        # archive containing only lib.rmeta (no object code) via -Zno-codegen.
+        # The file must have .rlib extension so rustc opens it as an rlib archive
+        # (extracting lib.rmeta, which includes optimized MIR). Using .rmeta
+        # extension would cause E0786 "found invalid metadata files" because rustc
+        # tries to read .rmeta files as raw metadata, not as rlib archives.
+        #
+        # IMPORTANT: The hollow rlib is placed in a "_hollow/" subdirectory rather
+        # than the same directory as the full rlib. This avoids rustc finding both
+        # files when searching a "-Ldependency=<dir>" path: since both the full rlib
+        # and the hollow rlib have the same crate name and SVH, rustc would treat
+        # them as ambiguous and fail with E0463 "can't find crate".
+        rust_metadata = ctx.actions.declare_file(
+            "_hollow/" + rust_lib_name[:-len(".rlib")] + "-hollow.rlib",
+        )
+        rustc_rmeta_output = generate_output_diagnostics(ctx, rust_metadata)
 
     deps = transform_deps(ctx.attr.deps)
     proc_macro_deps = transform_deps(ctx.attr.proc_macro_deps + get_import_macro_deps(ctx))
