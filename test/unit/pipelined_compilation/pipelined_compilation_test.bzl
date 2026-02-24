@@ -215,16 +215,14 @@ def _rmeta_is_used_when_building_custom_rule_test_impl(ctx):
             seen_to_wrap_rlib = True
 
     if ctx.attr.generate_metadata:
-        # When the wrapper crate generates its own hollow rlib (use_hollow_rlib=True),
-        # the Rustc action uses the full rlib of to_wrap for --extern to ensure SVH
-        # consistency with downstream binaries. Both the full rlib (for --extern) and
-        # the hollow rlib (for sandbox -Ldependency resolution) appear in the inputs.
+        # When wrapper generates its own hollow rlib, the Rustc action uses the full
+        # rlib of to_wrap for --extern (SVH consistency) and also has the hollow rlib
+        # in the sandbox for -Ldependency= resolution.
         asserts.true(env, seen_to_wrap_hollow, "expected hollow rlib in inputs (for sandbox) when generate_metadata=True")
         asserts.true(env, seen_to_wrap_rlib, "expected full rlib in inputs for --extern when generate_metadata=True")
     else:
-        # When the wrapper crate does not generate its own hollow rlib (use_hollow_rlib=False),
-        # the Rustc action uses the hollow rlib of to_wrap via normal _depend_on_metadata
-        # logic (pipelining-enabled rlib deps use hollow rlibs).
+        # When wrapper does not generate its own hollow rlib, the Rustc action uses
+        # hollow rlib deps via normal _depend_on_metadata logic (pipelined rlib deps).
         asserts.true(env, seen_to_wrap_hollow, "expected dependency on metadata for 'to_wrap' but not found")
         asserts.false(env, seen_to_wrap_rlib, "expected no dependency on object for 'to_wrap' but it was found")
 
@@ -245,9 +243,10 @@ def _rmeta_not_produced_if_pipelining_disabled_test_impl(ctx):
 rmeta_not_produced_if_pipelining_disabled_test = analysistest.make(_rmeta_not_produced_if_pipelining_disabled_test_impl, config_settings = ENABLE_PIPELINING)
 
 def _hollow_rlib_env_test_impl(ctx):
-    """Verify that RUSTC_BOOTSTRAP=1 is set on both Rustc and RustcMetadata actions
-    when hollow rlib pipelining is active. RUSTC_BOOTSTRAP=1 changes the crate hash (SVH),
-    so it must be consistent across both actions for hash compatibility."""
+    """Verify RUSTC_BOOTSTRAP=1 is set consistently on both Rustc and RustcMetadata actions.
+
+    RUSTC_BOOTSTRAP=1 changes the crate hash (SVH), so it must be set on both actions
+    to keep the hollow rlib and full rlib SVHs consistent."""
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
     metadata_action = [act for act in tut.actions if act.mnemonic == "RustcMetadata"][0]
@@ -326,9 +325,9 @@ def _custom_rule_test(generate_metadata, suffix):
     ]
 
 def _svh_chain_test_impl(ctx):
-    """Verify that the binary in a 4-crate chain (proc_macro->leaf->mid->top->bin)
-    does not have .rmeta or -hollow.rlib inputs when pipelining is enabled. Library crates use
-    hollow rlib deps (-hollow.rlib archives); binaries use full .rlib deps."""
+    """Verify that a binary in a multi-crate chain uses full rlib deps, not hollow rlibs.
+
+    Library crates use hollow rlib deps (-hollow.rlib); binaries use full .rlib deps."""
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
 

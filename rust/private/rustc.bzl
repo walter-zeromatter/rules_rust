@@ -673,27 +673,19 @@ def _depend_on_metadata(crate_info, force_depend_on_objects, experimental_use_cc
     In some rare cases, even if both of those conditions are true, we still want to
     depend on objects. This is what force_depend_on_objects is.
 
-    When experimental_use_cc_common_link is True, binary and cdylib crates also use
-    hollow rlib deps for SVH consistency. The rustc step only produces .o files
-    (--emit=obj), so no linking occurs and SVH chain consistency is sufficient.
-    The actual linking is done by cc_common.link, which does not check SVH.
-
-    This Phase 4 hollow rlib behavior is skipped for exec-platform (build script)
-    binaries. Build scripts compile for the exec platform and cc_common.link resolves
-    their deps from CcInfo (full rlibs). If the exec-platform hollow rlibs have
-    different function symbol hashes than the full rlibs in CcInfo (which can occur
-    due to exec-platform-specific build differences), the linker will fail with
-    undefined symbol errors. By using full rlib deps for exec-platform binaries we
-    ensure the rustc compilation and cc_common.link linking steps agree on symbols.
+    When experimental_use_cc_common_link is True, bin/cdylib crates also use hollow
+    rlib deps. The rustc step only emits .o files (no rustc linking), so SVH chain
+    consistency is sufficient; the actual linking is done by cc_common.link, which
+    does not check SVH. This does not apply to exec-platform binaries (build scripts),
+    which use full rlib deps to avoid symbol mismatches with the full rlibs in CcInfo.
 
     Args:
         crate_info (CrateInfo): The Crate to determine this for.
         force_depend_on_objects (bool): if set we will not depend on metadata.
         experimental_use_cc_common_link (bool): if set, bin/cdylib crates also use
             hollow rlib deps for SVH consistency.
-        is_exec (bool): if set, the crate is being compiled for the exec platform
-            (e.g., a build script or tool). Phase 4's hollow rlib dep behavior is
-            suppressed for exec-platform binaries.
+        is_exec (bool): if set, this is an exec-platform build (e.g. a build script);
+            hollow rlib deps are suppressed for exec-platform binaries.
 
     Returns:
         Whether we can depend on metadata for this crate.
@@ -702,11 +694,8 @@ def _depend_on_metadata(crate_info, force_depend_on_objects, experimental_use_cc
         return False
 
     if experimental_use_cc_common_link and not is_exec and crate_info.type in ("bin", "cdylib"):
-        # When linking via cc_common.link, the rustc compilation step only produces
-        # .o files (no rustc linking). Using hollow rlib deps keeps the SVH chain
-        # consistent, avoiding mismatches from non-deterministic proc macros.
-        # This only applies to target-platform binaries; exec-platform (build scripts)
-        # use full rlib deps to avoid symbol mismatches with the full rlibs in CcInfo.
+        # cc_common.link: rustc only emits .o files, so hollow rlib deps are safe and
+        # keep the SVH chain consistent (avoiding E0460 from nondeterministic proc macros).
         return True
 
     return crate_info.type in ("rlib", "lib")
@@ -832,14 +821,11 @@ def collect_inputs(
         transitive = [
             crate_info.srcs,
             transitive_crate_outputs,
-            # Always include transitive_metadata_outputs so that hollow rlibs are
-            # accessible in the sandbox for -Ldependency=<_hollow_dir> search paths.
-            # When pipelining is active, pipelined rlibs are compiled against hollow
-            # transitive deps (which may have a different SVH than full rlibs due to
-            # -Zno-codegen). Downstream crates (binaries, proc-macros) must find the
-            # same hollow rlibs when rustc resolves transitive dependencies during
-            # compilation. For pipelined rlib crates, this is a no-op because
-            # transitive_crate_outputs is already transitive_metadata_outputs.
+            # Always include hollow rlibs so they are present in the sandbox for
+            # -Ldependency= resolution. Binaries and proc-macros compile against full
+            # rlib --extern deps but need hollow rlibs available for transitive
+            # dependency resolution when those rlibs were themselves compiled against
+            # hollow deps. For rlib/lib crates this is a no-op (already included above).
             dep_info.transitive_metadata_outputs,
             crate_info.compile_data,
             dep_info.transitive_proc_macro_data,
@@ -1206,10 +1192,8 @@ def construct_arguments(
 
     use_metadata = _depend_on_metadata(crate_info, force_depend_on_objects, experimental_use_cc_common_link, is_exec_configuration(ctx))
 
-    effective_force_all_deps_direct = force_all_deps_direct
-
     # These always need to be added, even if not linking this crate.
-    add_crate_link_flags(rustc_flags, dep_info, effective_force_all_deps_direct, use_metadata)
+    add_crate_link_flags(rustc_flags, dep_info, force_all_deps_direct, use_metadata)
 
     needs_extern_proc_macro_flag = _is_proc_macro(crate_info) and crate_info.edition != "2015"
     if needs_extern_proc_macro_flag:
@@ -1395,12 +1379,9 @@ def rustc_compile_action(
         elif ctx.attr.experimental_use_cc_common_link == -1:
             experimental_use_cc_common_link = toolchain._experimental_use_cc_common_link
 
-    # Exec-platform binaries (build scripts, host tools) cannot use cc_common.link
-    # because Rust rlib deps built in exec configuration may not have a CC toolchain
-    # available, resulting in empty CcInfo linking contexts and undefined symbol errors.
-    # Exec-platform binaries use standard rustc compile+link, which handles rlib deps
-    # natively via --extern flags. Compilation already uses full rlibs in exec config
-    # (see _depend_on_metadata), so the SVH chain is consistent for standard linking.
+    # Exec-platform binaries (build scripts) skip cc_common.link: exec-configuration
+    # rlib deps may lack a CC toolchain, causing empty CcInfo linking contexts. They
+    # use standard rustc linking with full rlib deps instead.
     if experimental_use_cc_common_link and is_exec_configuration(ctx):
         experimental_use_cc_common_link = False
 
@@ -1442,25 +1423,12 @@ def rustc_compile_action(
         experimental_use_cc_common_link = experimental_use_cc_common_link,
     )
 
-    # When building with the hollow rlib approach, the main Rustc action (full
-    # compilation) must use FULL rlibs as deps, not hollow rlibs.
-    #
-    # If the Rustc action uses hollow rlib deps, the full rlib it produces embeds the
-    # hollow rlib's SVH for each dep. A downstream binary (without cc_common.link)
-    # provides the full rlibs as transitive deps, so rustc sees a SVH mismatch when
-    # nondeterministic proc macros cause the hollow and full rlibs to have different
-    # hashes (E0460 "found possibly newer version of crate").
-    #
-    # With this fix the Rustc action's full rlib records the full-rlib SVH of each dep,
-    # which is consistent with what the binary sees in its -Ldependency path.
-    #
+    # The main Rustc action uses FULL rlib deps so the full rlib it produces records
+    # full-rlib SVHs. A downstream binary links against full rlibs; if the Rustc action
+    # had used hollow rlib deps instead, nondeterministic proc macros could produce
+    # different SVHs for the hollow vs full rlib, causing E0460 in the binary build.
     # The RustcMetadata action still uses hollow rlibs (compile_inputs_for_metadata)
-    # so downstream metadata actions can start as soon as RustcMetadata completes,
-    # preserving the pipelining benefit for analysis and IDE use cases.
-    #
-    # For binaries that use cc_common.link, the binary's Rustc step uses hollow rlibs
-    # via _depend_on_metadata (the hollow rlib chain is self-consistent), so the full
-    # rlib chain used here never interferes with those builds.
+    # so it can start before full codegen of its deps completes.
     compile_inputs_for_metadata = compile_inputs
     if use_hollow_rlib:
         compile_inputs, _, _, _, _, _ = collect_inputs(
@@ -1480,18 +1448,8 @@ def rustc_compile_action(
             experimental_use_cc_common_link = experimental_use_cc_common_link,
         )
 
-    # The types of rustc outputs to emit.
-    #
-    # Hollow rlib approach (Buck2-style): the main Rustc action emits dep-info and link.
-    # The metadata action uses --emit=link=<hollow_rlib_path> with -Zno-codegen.
-    # The hollow_rlib_path has .rlib extension (declared as libfoo-HASH-hollow.rlib),
-    # so rustc reads it as an rlib archive and finds optimized MIR in lib.rmeta.
-    # Using --emit=metadata would produce raw .rmeta without optimized MIR, causing
-    # downstream full compilations to fail with "missing optimized MIR" on Rust 1.85+.
-    # SVH compatibility is ensured by -Zno-codegen and RUSTC_BOOTSTRAP=1 on both actions.
-    #
-    # When cc_common linking is enabled, emit a `.o` file, which is later
-    # passed to the cc_common.link action.
+    # The main Rustc action emits dep-info and link (the full rlib/binary/cdylib).
+    # When cc_common linking is enabled, emit a `.o` file instead.
     emit = ["dep-info", "link"]
     if experimental_use_cc_common_link:
         emit = ["obj"]
@@ -1527,11 +1485,7 @@ def rustc_compile_action(
         force_all_deps_direct = force_all_deps_direct,
         stamp = stamp,
         use_json_output = bool(build_metadata) or bool(rustc_output) or bool(rustc_rmeta_output),
-        # Force full rlib deps in the --extern arguments so the full rlib records
-        # full-rlib SVHs (consistent with what a downstream binary provides in its
-        # -Ldependency path).  The metadata action's construct_arguments call (below)
-        # keeps force_depend_on_objects=False so it continues to reference hollow rlibs
-        # for the pipelining benefit.
+        # Force full rlib --extern deps so the full rlib records full-rlib SVHs.
         force_depend_on_objects = use_hollow_rlib,
         experimental_use_cc_common_link = experimental_use_cc_common_link,
         skip_expanding_rustc_env = skip_expanding_rustc_env,
@@ -1541,21 +1495,13 @@ def rustc_compile_action(
     args_metadata = None
     if build_metadata:
         if use_hollow_rlib:
-            # Hollow rlib: the metadata action emits --emit=dep-info,link=<path>
-            # directed to a -hollow.rlib file. The file must have .rlib extension so
-            # rustc reads it as an rlib archive (extracting lib.rmeta with optimized MIR).
-            # Using --emit=metadata would produce raw metadata without optimized MIR,
-            # causing downstream full compilations to fail with "missing optimized MIR".
-            #
-            # IMPORTANT: dep-info must be included. --emit=dep-info changes the SVH stored
-            # in the rlib metadata. If the hollow action omits dep-info but the full action
-            # includes it, the hollow and full rlibs get different SVH values, breaking
-            # downstream crates. The .d file written by dep-info is discarded.
+            # Hollow rlib: emit dep-info and link (directed to the -hollow.rlib path via
+            # -Zno-codegen). dep-info must be included: it affects the SVH stored in the
+            # rlib, so both actions must include it to keep SVHs consistent.
             metadata_emit = ["dep-info", "link"]
         else:
-            # IDE-only metadata for non-rlib types (bin, proc-macro, etc.): emit just
-            # dep-info and metadata so rustc exits naturally after writing .rmeta.
-            # No process-wrapper kill needed (the old --rustc-quit-on-rmeta approach).
+            # IDE-only metadata for non-rlib types (bin, proc-macro, etc.): rustc exits
+            # naturally after writing .rmeta with --emit=dep-info,metadata.
             metadata_emit = ["dep-info", "metadata"]
         args_metadata, _ = construct_arguments(
             ctx = ctx,
@@ -2283,15 +2229,10 @@ def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_meta
     crate_to_link_flags = _crate_to_link_flag_metadata if use_metadata else _crate_to_link_flag
     args.add_all(direct_crates, uniquify = True, map_each = crate_to_link_flags)
 
-    # When use_metadata=True (library crates), the sandbox only contains hollow rlibs
-    # (dep_info.transitive_metadata_outputs). Use hollow dirs so rustc finds the hollow
-    # rlibs for transitive dep resolution. Both --extern= (direct) and -Ldependency=
-    # (transitive) then point to the same hollow rlib file, avoiding ambiguity.
-    #
-    # When use_metadata=False (proc-macros, bins), the sandbox contains full rlibs
-    # (dep_info.transitive_crate_outputs). Use full dirs so rustc finds the full rlibs.
-    # Pointing to hollow dirs here would put TWO rlib files for the same crate (full via
-    # --extern=, hollow via -Ldependency=) in scope simultaneously — causing E0463.
+    # Use hollow rlib directories for -Ldependency= when use_metadata=True (rlib/lib)
+    # so that both --extern= and -Ldependency= point to the same hollow rlib file.
+    # When use_metadata=False (bins, proc-macros), use full rlib directories; pointing
+    # to hollow dirs alongside full --extern= args would cause E0463 (ambiguous crate).
     get_dirname = _get_crate_dirname_pipelined if use_metadata else _get_crate_dirname
     args.add_all(
         dep_info.transitive_crates,

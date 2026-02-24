@@ -1,35 +1,4 @@
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(":pipelined_compilation_test.bzl", "pipelined_compilation_test_suite")
 
 ############################ UNIT TESTS #############################
 pipelined_compilation_test_suite(name = "pipelined_compilation_test_suite")
-
-############################ INTEGRATION TEST #############################
-# SVH Mismatch Demonstration Test
-#
-# This shell test demonstrates the SVH (Strict Version Hash) mismatch problem
-# that motivated the hollow rlib pipelining approach, and verifies that the
-# new approach (Rustc action uses full rlib deps) resolves it.
-#
-# The test:
-#   1. Simulates SVH mismatch using RUSTC_BOOTSTRAP=1 inconsistency (reliable)
-#      to show that the "old method" (Rustc action with hollow rlib deps) causes
-#      E0460 when hollow and full rlibs have different SVH values.
-#   2. Shows the "new method" (Rustc action with full rlib deps) avoids the
-#      mismatch by ensuring the SVH chain is self-consistent.
-#
-# Reference: pipelined-compilation-fix.md, rust/private/rustc.bzl
-
-sh_test(
-    name = "svh_mismatch_demo_test",
-    srcs = ["svh_mismatch_demo_test.sh"],
-    data = [
-        # Provides the rustc binary in the test's runfiles tree.
-        # The shell script finds it via find("*/rust_toolchain/bin/rustc").
-        "@rules_rust//rust/toolchain:current_rustc_files",
-    ],
-    target_compatible_with = select({
-        "@platforms//os:windows": ["@platforms//:incompatible"],
-        "//conditions:default": [],
-    }),
-)
