@@ -1,7 +1,7 @@
 """Unittests for rust rules."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
-load("//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro")
+load("//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 load("//test/unit:common.bzl", "assert_argv_contains", "assert_list_contains_adjacent_elements", "assert_list_contains_adjacent_elements_not")
 load(":wrap.bzl", "wrap")
 
@@ -254,6 +254,66 @@ def _custom_rule_test(generate_metadata, suffix):
         ":rmeta_is_used_when_building_custom_rule_test" + suffix,
     ]
 
+def _svh_mismatch_test():
+    """Creates a rust_test demonstrating SVH mismatch with non-deterministic proc macros.
+
+    Without pipelining (default): each library is compiled exactly once, SVH
+    is consistent across the dependency graph, and the test builds and passes.
+
+    With pipelining (//rust/settings:pipelined_compilation=true): rules_rust
+    compiles svh_lib twice in separate rustc invocations — once for the hollow
+    metadata (.rmeta), once for the full .rlib. Because the proc macro uses
+    HashMap with OS-seeded randomness, these two invocations typically produce
+    different token streams and therefore different SVH values. The consumer is
+    compiled against the hollow .rmeta (recording SVH_1); when rustc links the
+    test binary against the full .rlib (SVH_2), it detects SVH_1 ≠ SVH_2 and
+    fails with E0460. The test is therefore expected to FAIL TO BUILD most of
+    the time (~99.2% with 5 HashMap entries) when pipelining is enabled.
+
+    The test is marked flaky because the SVH mismatch is non-deterministic:
+    on rare occasions (~0.8%) both rustc invocations produce the same HashMap
+    iteration order and the build succeeds even with pipelining enabled.
+    """
+    native.config_setting(
+        name = "pipelining_enabled_for_svh_test",
+        flag_values = {str(Label("//rust/settings:pipelined_compilation")): "true"},
+    )
+
+    rust_proc_macro(
+        name = "svh_nondeterministic_macro",
+        srcs = ["svh_mismatch_nondeterministic_macro.rs"],
+        crate_name = "nondeterministic_macro",
+        edition = "2021",
+    )
+
+    rust_library(
+        name = "svh_lib",
+        srcs = ["svh_mismatch_lib.rs"],
+        edition = "2021",
+        proc_macro_deps = [":svh_nondeterministic_macro"],
+    )
+
+    rust_library(
+        name = "svh_consumer",
+        srcs = ["svh_mismatch_consumer.rs"],
+        edition = "2021",
+        deps = [":svh_lib"],
+    )
+
+    rust_test(
+        name = "svh_mismatch_test",
+        srcs = ["svh_mismatch_test.rs"],
+        edition = "2021",
+        deps = [":svh_consumer"],
+        flaky = True,
+        target_compatible_with = select({
+            ":pipelining_enabled_for_svh_test": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }) + _NO_WINDOWS,
+    )
+
+    return [":svh_mismatch_test"]
+
 def pipelined_compilation_test_suite(name):
     """Entry-point macro called from the BUILD file.
 
@@ -265,6 +325,7 @@ def pipelined_compilation_test_suite(name):
     tests.extend(_disable_pipelining_test())
     tests.extend(_custom_rule_test(generate_metadata = True, suffix = "_with_metadata"))
     tests.extend(_custom_rule_test(generate_metadata = False, suffix = "_without_metadata"))
+    tests.extend(_svh_mismatch_test())
 
     native.test_suite(
         name = name,
