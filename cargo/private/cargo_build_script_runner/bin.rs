@@ -526,9 +526,18 @@ windows
 
     #[test]
     fn skip_pattern_prefix_glob() {
-        assert!(match_skip_pattern("local-spawn-runner.*", "local-spawn-runner.12345"));
-        assert!(match_skip_pattern("local-spawn-runner.*", "local-spawn-runner."));
-        assert!(!match_skip_pattern("local-spawn-runner.*", "local-spawn-runner"));
+        assert!(match_skip_pattern(
+            "local-spawn-runner.*",
+            "local-spawn-runner.12345"
+        ));
+        assert!(match_skip_pattern(
+            "local-spawn-runner.*",
+            "local-spawn-runner."
+        ));
+        assert!(!match_skip_pattern(
+            "local-spawn-runner.*",
+            "local-spawn-runner"
+        ));
         assert!(!match_skip_pattern("local-spawn-runner.*", "other-thing"));
     }
 
